@@ -1,0 +1,73 @@
+name: sync-upstream
+
+# Weekly sync of mealie-recipes/mealie -> benediktn-msft/mealie.
+# Strategy:
+#   1. Try fast-forward merge of upstream/mealie-next into mealie-next.
+#   2. If clean, push.
+#   3. If conflicts, push upstream tip to a sync/ branch and open a PR for manual review.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"   # Mondays 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (mealie-next)
+        uses: actions/checkout@v4
+        with:
+          ref: mealie-next
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "mealie-fork-sync[bot]"
+          git config user.email "mealie-fork-sync[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/mealie-recipes/mealie.git
+
+      - name: Fetch upstream
+        run: git fetch upstream --tags --prune
+
+      - name: Try fast-forward merge
+        id: ff
+        run: |
+          set -e
+          if git merge-base --is-ancestor HEAD upstream/mealie-next; then
+            echo "Fork is ancestor of upstream — fast-forwarding."
+            git merge --ff-only upstream/mealie-next
+            echo "result=ff" >> "$GITHUB_OUTPUT"
+          elif git merge --no-edit upstream/mealie-next; then
+            echo "Clean merge."
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            echo "Conflicts — abort and fall back to PR."
+            git merge --abort || true
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push to mealie-next
+        if: steps.ff.outputs.result != 'conflict'
+        run: git push origin mealie-next
+
+      - name: Create sync branch + PR for conflicts
+        if: steps.ff.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH" upstream/mealie-next
+          git push origin "$BRANCH"
+          gh pr create \
+            --base mealie-next \
+            --head "$BRANCH" \
+            --title "chore: sync upstream mealie-recipes/mealie ($(date -u +%Y-%m-%d))" \
+            --body "Automated weekly upstream sync hit conflicts on ff/merge. Manual review required.\n\nUpstream: mealie-recipes/mealie@mealie-next\nFork branch: mealie-next" || true
