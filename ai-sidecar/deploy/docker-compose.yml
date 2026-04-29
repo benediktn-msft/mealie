@@ -1,0 +1,71 @@
+# docker-compose.yml for the Mealie + AI sidecar stack on the NUC.
+#
+# Lives at /home/nuc/docker/mealie/docker-compose.yml.
+#
+# Build the two sidecars locally on the NUC:
+#   docker build -t copilot-proxy:latest /path/to/mealie-fork/ai-sidecar/copilot-proxy
+#   docker build -t mealie-ai:latest    /path/to/mealie-fork/ai-sidecar/mealie-ai
+
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:latest
+    container_name: mealie
+    restart: unless-stopped
+    ports:
+      - "9925:9000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - ALLOW_SIGNUP=true
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Vienna
+      - BASE_URL=http://mealie.nuc.lan
+      - MAX_WORKERS=1
+      - WEB_CONCURRENCY=1
+      # Mealie talks to the proxy, NOT to OpenAI directly.
+      - OPENAI_API_KEY=copilot-proxy
+      - OPENAI_BASE_URL=http://copilot-proxy:8080/v1
+      - OPENAI_MODEL=gpt-4o
+      - OPENAI_ENABLE_IMAGE_SERVICES=true
+      - OPENAI_ENABLE_TRANSCRIPTION_SERVICES=true
+    depends_on:
+      - copilot-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  copilot-proxy:
+    image: copilot-proxy:latest
+    container_name: copilot-proxy
+    restart: unless-stopped
+    volumes:
+      - ./copilot-token.json:/data/copilot-token.json:ro
+    environment:
+      - COPILOT_TOKEN_FILE=/data/copilot-token.json
+      # Optional emergency fallback. Leave empty to fail closed.
+      - OPENAI_FALLBACK_KEY=${OPENAI_FALLBACK_KEY:-}
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  mealie-ai:
+    image: mealie-ai:latest
+    container_name: mealie-ai
+    restart: unless-stopped
+    ports:
+      - "9926:8081"
+    environment:
+      - MEALIE_URL=http://mealie:9000
+      - MEALIE_API_KEY=${MEALIE_API_KEY}
+      - COPILOT_PROXY_URL=http://copilot-proxy:8080
+      - AI_MODEL=gpt-4o
+    depends_on:
+      - mealie
+      - copilot-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
