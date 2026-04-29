@@ -1,52 +1,61 @@
-# `ai-sidecar/` — Mealie AI companion services
+# `ai-sidecar/` — Copilot proxy for Mealie
 
-This directory holds everything needed to run the AI features alongside upstream Mealie,
-**without modifying upstream code**. Upstream sync (see
-[`.github/workflows/sync-upstream.yml`](../.github/workflows/sync-upstream.yml)) stays clean.
+This directory holds the OpenAI-compatible proxy that lets Mealie's **built-in** AI
+features (image-to-recipe, video-to-recipe, URL-to-recipe, OCR, transcription, …)
+run on **GitHub Copilot** instead of a paid OpenAI API key.
+
+The Mealie codebase itself is not modified — upstream sync stays clean.
+
+> **History:** an earlier iteration also shipped a separate `mealie-ai` FastAPI
+> sidecar on port 9926 with 8 extra endpoints (chat, fridge, meal-plan, scale,
+> auto-tag, shopping-list, similar, improve). It was removed on 2026-04-29:
+> Benni wants **one** frontend, and integrating those features cleanly into
+> Mealie's Vue UI would have required a custom Mealie image build plus
+> persistent merge conflicts on every weekly upstream sync — too much
+> maintenance burden for features that mostly duplicate what Mealie already
+> does. Use Mealie's built-in AI features instead; they go through this proxy.
 
 ## Layout
 
 ```
 ai-sidecar/
-├── mealie-ai/           # FastAPI sidecar — 8 user-facing AI endpoints
-│   ├── app.py
-│   └── Dockerfile
 ├── copilot-proxy/       # OpenAI-compat proxy → GitHub Copilot
 │   ├── proxy.py
 │   └── Dockerfile
 └── deploy/
-    └── docker-compose.yml   # NUC stack: mealie + copilot-proxy + mealie-ai
+    └── docker-compose.yml   # NUC stack: mealie + copilot-proxy
 ```
 
 ## Build & run on the NUC
 
 ```bash
 cd /home/nuc/docker/mealie
-# build sidecars
-docker build -t copilot-proxy:latest /path/to/mealie/ai-sidecar/copilot-proxy
-docker build -t mealie-ai:latest    /path/to/mealie/ai-sidecar/mealie-ai
-# bring up
+docker build -t copilot-proxy:latest /path/to/mealie-fork/ai-sidecar/copilot-proxy
 docker compose up -d
 ```
 
-## Endpoints
+The proxy listens on port `8080` **inside the docker network only** — it is not
+exposed to the host. Mealie reaches it via `http://copilot-proxy:8080/v1`.
 
-The sidecar listens on port `9926` (host). All routes:
+## What Mealie sees
 
 ```
-POST /api/ai/chat            { recipe_slug, question }
-POST /api/ai/adapt           { recipe_slug, diet, save_as_new? }
-POST /api/ai/fridge          { ingredients[], preferences?, max_suggestions? }
-POST /api/ai/suggest         (legacy alias for /fridge)
-POST /api/ai/meal-plan       { days?, constraints?, include_breakfast?, ... }
-POST /api/ai/scale           { recipe_slug, target_servings }
-POST /api/ai/auto-tag        { recipe_slug, apply? }
-POST /api/ai/auto-tag-all    { max_recipes? }
-POST /api/ai/shopping-list   { recipe_slugs[], servings_overrides?, pantry? }
-POST /api/ai/similar         { recipe_slug, twist?, max_results? }
-POST /api/ai/improve         { recipe_slug, focus? }
-GET  /health
+OPENAI_API_KEY=copilot-proxy        # placeholder, the proxy ignores it
+OPENAI_BASE_URL=http://copilot-proxy:8080/v1
+OPENAI_MODEL=gpt-4o
+OPENAI_ENABLE_IMAGE_SERVICES=true
+OPENAI_ENABLE_TRANSCRIPTION_SERVICES=true
 ```
 
-See [`AI_INTEGRATION.md`](../AI_INTEGRATION.md) for the architecture diagram and Copilot
-backend details.
+## How the proxy works
+
+* Reads a Copilot session token from `/data/copilot-token.json` (mounted
+  read-only from `/home/nuc/docker/mealie/copilot-token.json`).
+* Forwards OpenAI-compatible chat-completion requests to
+  `https://api.enterprise.githubcopilot.com`.
+* Patches JSON-schema `response_format` objects (Copilot requires
+  `additionalProperties: false`).
+* Falls back to a real OpenAI key (`OPENAI_FALLBACK_KEY`) only if the Copilot
+  token is missing or expired. Leave the var empty to fail closed.
+
+See [`AI_INTEGRATION.md`](../AI_INTEGRATION.md) for the architecture diagram.

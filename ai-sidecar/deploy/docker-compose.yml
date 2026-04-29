@@ -1,10 +1,9 @@
-# docker-compose.yml for the Mealie + AI sidecar stack on the NUC.
+# docker-compose.yml for the Mealie + Copilot proxy stack on the NUC.
 #
 # Lives at /home/nuc/docker/mealie/docker-compose.yml.
 #
-# Build the two sidecars locally on the NUC:
+# Build the proxy locally on the NUC:
 #   docker build -t copilot-proxy:latest /path/to/mealie-fork/ai-sidecar/copilot-proxy
-#   docker build -t mealie-ai:latest    /path/to/mealie-fork/ai-sidecar/mealie-ai
 
 services:
   mealie:
@@ -23,7 +22,9 @@ services:
       - BASE_URL=http://mealie.nuc.lan
       - MAX_WORKERS=1
       - WEB_CONCURRENCY=1
-      # Mealie talks to the proxy, NOT to OpenAI directly.
+      # Mealie's built-in AI features (image-to-recipe, video-to-recipe,
+      # URL-to-recipe, etc.) talk to the proxy, NOT to OpenAI directly.
+      # The proxy forwards to GitHub Copilot.
       - OPENAI_API_KEY=copilot-proxy
       - OPENAI_BASE_URL=http://copilot-proxy:8080/v1
       - OPENAI_MODEL=gpt-4o
@@ -50,22 +51,3 @@ services:
       resources:
         limits:
           memory: 64M
-
-  mealie-ai:
-    image: mealie-ai:latest
-    container_name: mealie-ai
-    restart: unless-stopped
-    ports:
-      - "9926:8081"
-    environment:
-      - MEALIE_URL=http://mealie:9000
-      - MEALIE_API_KEY=${MEALIE_API_KEY}
-      - COPILOT_PROXY_URL=http://copilot-proxy:8080
-      - AI_MODEL=gpt-4o
-    depends_on:
-      - mealie
-      - copilot-proxy
-    deploy:
-      resources:
-        limits:
-          memory: 128M

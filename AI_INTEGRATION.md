@@ -1,16 +1,19 @@
 # Mealie AI Integration
 
-This is **benediktn-msft's fork** of [mealie-recipes/mealie](https://github.com/mealie-recipes/mealie),
-extended with an AI companion sidecar that uses **GitHub Copilot** (via an OpenAI-compatible proxy)
-as the LLM backend — never a direct OpenAI API key.
+This is **benediktn-msft's fork** of [mealie-recipes/mealie](https://github.com/mealie-recipes/mealie).
 
-The Mealie codebase itself is left untouched so upstream syncs stay clean. All AI features live in
-two sidecar services and an optional docker-compose overlay.
+The only modification vs. upstream is a small **Copilot proxy** sidecar that lets
+Mealie's built-in AI features run on **GitHub Copilot** instead of a direct OpenAI API key.
+The Mealie codebase itself is left untouched, so upstream syncs stay clean.
 
 ```
                     ┌──────────────────────────────┐
    browser ─────►   │ mealie  (upstream, unchanged)│
                     │  9925:9000                   │
+                    │  • image-to-recipe           │
+                    │  • video-to-recipe           │
+                    │  • URL-to-recipe             │
+                    │  • OCR / transcription       │
                     └─────────────┬────────────────┘
                                   │ OPENAI_BASE_URL=http://copilot-proxy:8080/v1
                                   ▼
@@ -19,69 +22,65 @@ two sidecar services and an optional docker-compose overlay.
                     │  • OpenAI-compatible REST    │
                     │  • Forwards to Copilot API   │
                     │  • Falls back to OpenAI key  │
-                    └─────────────┬────────────────┘
-                                  ▲
-                                  │ Bearer proxy
-                                  │
-                    ┌──────────────────────────────┐
-   browser/CLI ──►  │ mealie-ai (sidecar)          │
-                    │  9926:8081                   │
-                    │  /api/ai/{chat,fridge,...}   │
+                    │    only if Copilot token bad │
                     └──────────────────────────────┘
 ```
 
-## Sidecar services
+## One frontend, one app
 
-The two services are kept in sibling repos / workspace folders:
+Mealie's own Vue/Nuxt UI is the **only** UI. There is no second app, no second
+port, no extra Telegram-style sidecar. Every AI feature shown to the user is a
+feature Mealie itself ships and renders.
 
-| Service           | Repo path (workspace)                       | Port | Purpose                                |
-| ----------------- | ------------------------------------------- | ---- | -------------------------------------- |
-| `mealie-ai`       | `~/.openclaw/workspace/mealie-ai/`          | 8081 | FastAPI: 8 user-facing AI features     |
-| `copilot-proxy`   | `~/.openclaw/workspace/mealie-copilot-proxy/` | 8080 | OpenAI-compat proxy → GitHub Copilot |
+> **Removed 2026-04-29:** the earlier `mealie-ai` FastAPI sidecar on port 9926
+> (8 endpoints: chat, fridge, meal-plan, scale, auto-tag, shopping-list,
+> similar, improve) has been deleted. Cleanly integrating those into Mealie's
+> Vue frontend would have required a custom Mealie image build plus weekly
+> merge conflicts on actively-developed components (`RecipeContextMenu.vue`,
+> dashboard, admin, meal-planner, shopping-list). Most features also duplicated
+> capabilities Mealie already has. Not worth the maintenance burden for a
+> single-user instance.
 
-Both have small Dockerfiles (Python 3.12-slim) and run on the NUC under
-`/home/nuc/docker/mealie/docker-compose.yml`.
+## Sidecar service
 
-## AI endpoints (mealie-ai, port 9926 on host)
+| Service         | Path (in this repo)              | Port (network) | Purpose                              |
+| --------------- | -------------------------------- | -------------- | ------------------------------------ |
+| `copilot-proxy` | `ai-sidecar/copilot-proxy/`      | 8080 internal  | OpenAI-compat proxy → GitHub Copilot |
 
-All return JSON. All speak German by default and use metric units.
+Not published on the host — `mealie` reaches it via the docker network.
 
-| Method | Path                      | What it does                                                                |
-| ------ | ------------------------- | --------------------------------------------------------------------------- |
-| POST   | `/api/ai/chat`            | Q&A about a single recipe (substitutions, technique, etc.)                  |
-| POST   | `/api/ai/adapt`           | Convert recipe to a diet (vegan/GF/low-carb…) — saves as new recipe        |
-| POST   | `/api/ai/fridge`          | Ingredients in → matching existing recipes + new ideas                      |
-| POST   | `/api/ai/suggest`         | Legacy alias for `/fridge` (kept for backwards compat)                      |
-| POST   | `/api/ai/meal-plan`       | Build a balanced weekly plan from existing collection                       |
-| POST   | `/api/ai/scale`           | Smart scaling (rounds eggs, warns on bake timing, pan-size notes)           |
-| POST   | `/api/ai/auto-tag`        | Suggest + apply tags (cuisine, season, difficulty, diet, time, style)       |
-| POST   | `/api/ai/auto-tag-all`    | Batch auto-tag all under-tagged recipes                                     |
-| POST   | `/api/ai/shopping-list`   | Consolidated, sectioned shopping list from a list of recipe slugs           |
-| POST   | `/api/ai/similar`         | "Find me something like this, but vegetarian/quicker"                       |
-| POST   | `/api/ai/improve`         | Michelin-style suggestions to improve an existing recipe                    |
-| GET    | `/health`                 | Liveness + feature list                                                     |
+## Mealie environment
 
-Full request/response schemas are defined as Pydantic models in
-[`mealie-ai/app.py`](https://github.com/benediktn-msft/mealie-ai-companion).
+```
+OPENAI_API_KEY=copilot-proxy            # placeholder, ignored by proxy
+OPENAI_BASE_URL=http://copilot-proxy:8080/v1
+OPENAI_MODEL=gpt-4o
+OPENAI_ENABLE_IMAGE_SERVICES=true
+OPENAI_ENABLE_TRANSCRIPTION_SERVICES=true
+```
 
-## AI backend — Copilot, not OpenAI
+## How the proxy works
 
 `copilot-proxy` reads a Copilot session token from
-`/home/nuc/docker/mealie/copilot-token.json` (mounted read-only into the container) and forwards
-OpenAI-compatible chat-completion requests to `https://api.enterprise.githubcopilot.com`. It also
-patches JSON-schema response_format objects (Copilot needs `additionalProperties: false`) and falls
-back to a real OpenAI key only if the Copilot token is missing/expired.
+`/home/nuc/docker/mealie/copilot-token.json` (mounted read-only) and forwards
+OpenAI-compatible chat-completion requests to
+`https://api.enterprise.githubcopilot.com`. It patches JSON-schema
+`response_format` objects (Copilot needs `additionalProperties: false`) and
+falls back to a real OpenAI key only if the Copilot token is missing/expired.
 
-⚠️ The Mealie container itself never sees a real OpenAI key. `OPENAI_BASE_URL` points at the proxy.
+⚠️ The Mealie container itself never sees a real OpenAI key. `OPENAI_BASE_URL`
+points at the proxy.
 
 ## Upstream sync
 
-[`.github/workflows/sync-upstream.yml`](.github/workflows/sync-upstream.yml) runs weekly (Mon 04:17 UTC)
-and on demand. It tries fast-forward / clean merge from `mealie-recipes/mealie@mealie-next` into our
-`mealie-next` branch. On conflicts it opens a PR on a `sync/upstream-<timestamp>` branch for manual
-review.
+[`.github/workflows/sync-upstream.yml`](.github/workflows/sync-upstream.yml) runs weekly
+(Mon 04:17 UTC) and on demand. It tries fast-forward / clean merge from
+`mealie-recipes/mealie@mealie-next` into our `mealie-next` branch. On conflicts
+it opens a PR on a `sync/upstream-<timestamp>` branch for manual review.
+Because nothing in `mealie/` or `frontend/` is patched, sync should rarely
+conflict.
 
 ## Custom branch
 
-Day-to-day work happens on `custom-fork`. `mealie-next` mirrors upstream and is kept in sync via the
-workflow above.
+Day-to-day work happens on `custom-fork`. `mealie-next` mirrors upstream and is
+kept in sync via the workflow above.
